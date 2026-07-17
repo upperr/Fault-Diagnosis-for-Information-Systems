@@ -23,7 +23,7 @@ class AlertParser:
                 fault_summary="告警数据格式错误，无法解析",
                 affected_services=[],
                 root_cause="信息不足",
-                suggestion="请检查告警数据格式是否符合 JSON 规范，确保包含必要字段：微服务名称、告警信息、告警时间",
+                suggestion="请检查告警数据格式是否符合 JSON 规范，确保包含必要字段：微服务名称、告警时间",
             )
 
         is_complete, missing_fields = alert.validate_completeness()
@@ -33,7 +33,7 @@ class AlertParser:
                 fault_summary=f"告警信息不足，缺失关键字段：{', '.join(missing_fields)}",
                 affected_services=[alert.service] if alert.微服务名称 else [],
                 root_cause="信息不足",
-                suggestion=f"告警数据缺少以下必要字段：{', '.join(missing_fields)}。请确保告警推送时包含微服务名称、告警信息、告警时间字段。",
+                suggestion=f"告警数据缺少以下必要字段：{', '.join(missing_fields)}。请确保告警推送时包含微服务名称、告警时间字段。",
             )
 
         logger.info(f"告警解析成功：服务={alert.微服务名称}, 时间={alert.告警时间}")

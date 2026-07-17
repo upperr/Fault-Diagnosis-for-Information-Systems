@@ -8,7 +8,7 @@ API 接口规范：
 """
 import logging
 import httpx
-from config import LOG_API_BASE_URL, LOG_API_TIMEOUT
+from services.config import LOG_API_BASE_URL, LOG_API_TIMEOUT
 
 logger = logging.getLogger(__name__)
 

@@ -20,7 +20,7 @@ class ReportGenerator:
         """
         生成标准化 JSON 格式诊断报告。
         输出字段与 output.jsonl 完全一致：
-          fault_summary, affected_services, root_cause, suggestion
+          故障现象，排查流程，根因分析，处置建议
 
         Args:
             alert_error_message: 告警原始错误信息
@@ -48,10 +48,10 @@ class ReportGenerator:
                 fault_summary = f"{affected} 服务发生故障"
 
         report = DiagnosticReport(
-            fault_summary=fault_summary,
-            affected_services=list(call_chain),
-            root_cause=root_cause,
-            suggestion=suggestion,
+            故障现象=fault_summary,
+            排查流程=list(call_chain),
+            根因分析=root_cause,
+            处置建议=suggestion,
         )
 
         logger.info("诊断报告生成完成")

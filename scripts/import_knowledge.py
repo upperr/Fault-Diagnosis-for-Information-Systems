@@ -18,7 +18,7 @@ from openai import OpenAI
 CODE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(CODE_DIR))
 
-from config import (
+from services.config import (
     OPENAI_BASE_URL,
     OPENAI_API_KEY,
     EMBEDDING_MODEL,

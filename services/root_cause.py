@@ -1,12 +1,17 @@
 """根因智能推理模块
 
 使用 PostgreSQL 向量知识库进行相似度检索，结合 LLM 进行根因推理。
-支持新故障自动入库功能。
+支持新故障两阶段检测 + 用户确认流程。
 """
 import logging
 
-from config import VECTOR_SEARCH_THRESHOLD, VECTOR_SEARCH_LIMIT, ENABLE_AUTO_LEARN
-from services.knowledge_retriever import get_retriever
+from services.config import (
+    VECTOR_SEARCH_THRESHOLD,
+    VECTOR_SEARCH_LIMIT,
+    ENABLE_AUTO_LEARN,
+    NEW_CASE_INITIAL_THRESHOLD,
+)
+from services.knowledge_retriever.retriever import get_retriever
 from services.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -34,37 +39,59 @@ class RootCauseAnalyzer:
         """
         分析根因。
 
-        流程：
+        流程:
         1. 从日志中提取关键错误信息
-        2. 使用向量检索从 PostgreSQL 知识库中查找相似案例
+        2. 使用向量检索从 PostgreSQL 知识库中查找相似案例 (知识召回)
         3. 调用 LLM 节点，结合日志和相似案例推理根因
         4. 生成 fault_summary
-        5. 如果启用了自动学习且判定为新故障，则添加到知识库
+        5. 使用知识库管理器进行新故障检测（复用步骤 2 的检索结果）
+        6. 如果判定为新故障，返回待确认信息（不自动入库）
 
         Args:
             call_chain: 调用链
             all_logs: 全链路日志
             error_type: 错误类型
-            alert_info: 告警信息（可选，用于日志记录）
+            alert_info: 告警信息（包含 service_name, alert_message, alert_time）
 
         Returns:
             {
-                "root_cause": str,
-                "suggestion": str,
+                "根因分析": str,
+                "处置建议": str,
                 "fault_summary": str,  # 故障现象总结
                 "matched_cases": list[dict],
                 "confidence": str,  # high / medium / low
                 "is_new_case": bool,  # 是否为新故障
-                "new_case_message": str,  # 新故障入库消息
+                "new_case_message": str,  # 新故障消息或确认信息
+                "new_case_info": dict,  # 如果是新故障，包含确认所需信息
             }
         """
-        # 1. 向量检索（从 PostgreSQL 知识库）
+        alert_time = alert_info.get("alert_time", "") if alert_info else ""
+        alert_message = alert_info.get("alert_message", "") if alert_info else ""
+        
+        # 0. 如果告警信息为空，不执行知识库管理功能（不执行新故障检测）
+        if not alert_message or not alert_message.strip():
+            logger.info("告警信息为空，跳过知识库管理功能（不执行新故障检测）")
+            skip_knowledge_management = True
+        else:
+            skip_knowledge_management = False
+        
+        # 1. 完整知识召回流程：向量粗排 → Rerank 精排（阈值过滤） → LLM 决策
         query_text = self._extract_log_text(all_logs)
         try:
-            matched_cases, is_new, max_sim = self._vector_search_with_judge(query_text, error_type, call_chain)
-            logger.info(f"向量检索匹配到 {len(matched_cases)} 条相似案例，最高相似度：{max_sim:.3f}")
+            retrieval_result = self.kb_retriever.retrieve_with_rerank(
+                query=query_text,
+                search_fields=["symptom", "diagnosis_process", "root_cause"],
+                use_rerank=True,
+                use_decision=True,
+            )
+            # 使用 Rerank 精排后的案例（已通过阈值过滤）
+            matched_cases = retrieval_result.get("reranked_results", [])
+            # 新故障判定：基于 Rerank 最高分数
+            max_sim = max((c.get("rerank_score", c.get("similarity", 0)) for c in matched_cases), default=0.0)
+            is_new = max_sim < VECTOR_SEARCH_THRESHOLD
+            logger.info(f"知识召回：Rerank 精排后 {len(matched_cases)} 个案例，最高相似度：{max_sim:.3f}")
         except Exception as e:
-            logger.warning(f"知识库检索失败（{e}），使用空案例列表继续推理")
+            logger.warning(f"知识召回失败（{e}），使用空案例列表继续推理")
             matched_cases, is_new, max_sim = [], True, 0.0
 
         # 2. 调用 LLM 进行根因推理
@@ -76,27 +103,55 @@ class RootCauseAnalyzer:
         )
 
         # 3. 生成 fault_summary（用于知识库入库）
-        result["fault_summary"] = self._generate_fault_summary(
+        result["故障现象"] = self._generate_fault_summary(
             call_chain=call_chain,
             all_logs=all_logs,
-            root_cause=result.get("root_cause", ""),
+            root_cause=result.get("根因分析", ""),
         )
 
         result["matched_cases"] = matched_cases
         result["is_new_case"] = is_new
         result["new_case_message"] = ""
+        result["new_case_info"] = None
 
-        # 4. 如果启用了自动学习且是新故障，添加到知识库
-        if self.auto_learn and is_new:
+        # 4. 使用知识库管理器进行新故障检测（两阶段）
+        # 注意：不再自动入库，而是返回待确认信息
+        # 优化：直接传入知识召回的结果，避免重复检索
+        # 如果告警信息为空，跳过知识库管理功能
+        if skip_knowledge_management:
+            logger.info("已跳过知识库管理功能（告警信息为空）")
+        elif max_sim >= NEW_CASE_INITIAL_THRESHOLD:
+            # 相似度高，不触发入库复查
+            result["is_new_case"] = False
+            result["new_case_message"] = f"已有相似案例（最高相似度：{max_sim:.3f}）"
+        elif is_new:
+            # 相似度低，需要进一步检测
             from services.knowledge_manager import get_manager
             manager = get_manager()
-            success, message = manager.auto_add_new_case(
-                call_chain=call_chain,
-                all_logs=all_logs,
-                diagnosis_result=result,  # 包含 fault_summary, root_cause, suggestion
+            
+            need_confirmation, case_info_or_msg, llm_result = manager.is_new_case_llm_review(
+                alert_symptom=result.get("故障现象", ""),
+                affected_services=call_chain,
+                suggestion=result.get("处置建议", ""),
+                similar_cases=matched_cases,
             )
-            result["new_case_message"] = message
-            logger.info(f"自动学习：{message}")
+            
+            if need_confirmation:
+                # LLM 确认为新故障，返回确认信息
+                result["is_new_case"] = True
+                result["new_case_message"] = "检测到可能的新故障类型，请确认是否添加到知识库"
+                result["new_case_info"] = manager.generate_new_case_info(
+                    call_chain=call_chain,
+                    all_logs=all_logs,
+                    diagnosis_result=result,
+                    alert_time=alert_time,
+                    similar_cases=matched_cases,
+                    llm_review_result=llm_result,
+                )
+            else:
+                # LLM 判定为已有故障
+                result["is_new_case"] = False
+                result["new_case_message"] = case_info_or_msg
 
         return result
 
@@ -172,7 +227,7 @@ class RootCauseAnalyzer:
         Returns:
             (匹配的案例列表，是否为新故障，最高相似度)
         """
-        from config import NEW_CASE_SIMILARITY_THRESHOLD
+        from services.config import NEW_CASE_SIMILARITY_THRESHOLD
 
         matched = []
         
@@ -209,7 +264,7 @@ class RootCauseAnalyzer:
         # 3. 计算最高相似度
         max_sim = max((c.get("similarity", 0) for c in matched), default=0.0)
 
-        # 4. 判定是否为新故障
+        # 4. 判定是否为新故障（初筛，后续会由 knowledge_manager 进行两阶段检测）
         is_new = max_sim < NEW_CASE_SIMILARITY_THRESHOLD
 
         # 5. 过滤并返回结果
@@ -222,8 +277,8 @@ class RootCauseAnalyzer:
                 "case_id": f"CASE-{case['case_no']}",
                 "title": case["fault_symptom"][:50],
                 "fault_symptom": case["fault_symptom"],
-                "root_cause": case["root_cause"],
-                "suggestion": case["suggestion"],
+                "root_cause": case["根因分析"],
+                "suggestion": case["处置建议"],
                 "similarity": case.get("similarity", 0.0),  # 添加相似度字段
             })
 

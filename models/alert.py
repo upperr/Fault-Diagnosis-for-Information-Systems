@@ -1,11 +1,12 @@
 """告警数据模型"""
+from typing import Optional
 from pydantic import BaseModel, Field
 
 
 class Alert(BaseModel):
     """告警信息模型"""
     微服务名称:str = Field(..., description="微服务名称")
-    告警信息:str = Field(..., description="告警信息")
+    告警信息:Optional[str] = Field(None, description="告警信息（可选）")
     告警时间:str = Field(..., description="告警时间")
 
     @property
@@ -14,8 +15,8 @@ class Alert(BaseModel):
         return self.微服务名称
 
     @property
-    def error_message(self) -> str:
-        """兼容属性:告警信息"""
+    def error_message(self) -> str | None:
+        """兼容属性：告警信息"""
         return self.告警信息
 
     @property
@@ -38,6 +39,5 @@ class Alert(BaseModel):
             missing.append("微服务名称")
         if not self.告警时间:
             missing.append("告警时间")
-        if not self.告警信息:
-            missing.append("告警信息")
+        # 告警信息为可选字段，不再检查
         return len(missing) == 0, missing

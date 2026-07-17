@@ -143,37 +143,43 @@ def query_trace():
     service_name = request.args.get("serviceName")
     alert_time = request.args.get("alertTime")
     
+    from datetime import datetime, timedelta
+    
     # 标准化时间格式（处理 Z 后缀）
     alert_time_normalized = alert_time.rstrip("Z")
     
-    # 策略 1: 精确匹配 (serviceName + alertTime)
-    exact_key = f"{service_name}|{alert_time}"
-    normalized_key = f"{service_name}|{alert_time_normalized}"
+    # 解析告警时间
+    try:
+        alert_dt = datetime.fromisoformat(alert_time_normalized)
+    except Exception as e:
+        print(f"时间解析失败：{e}")
+        alert_dt = None
     
-    matched_logs = LOGS_INDEX.get(exact_key, [])
-    if not matched_logs:
-        matched_logs = LOGS_INDEX.get(normalized_key, [])
+    matched_logs = []
     
-    # 策略 2: 分钟级模糊匹配（忽略秒级差异）
-    # 例如：告警 10:05:08Z → 匹配日志 10:05:00Z
-    if not matched_logs:
-        # 提取告警时间的分钟部分（YYYY-MM-DDTHH:MM）
-        alert_minute = alert_time_normalized[:16]  # "2026-06-01T10:05"
+    if alert_dt:
+        # 计算时间范围：告警时间前后 5 分钟
+        start_dt = alert_dt - timedelta(minutes=5)
+        end_dt = alert_dt + timedelta(minutes=5)
         
-        # 查找同服务同分钟的所有日志
+        start_str = start_dt.strftime("%Y-%m-%dT%H:%M:%S")
+        end_str = end_dt.strftime("%Y-%m-%dT%H:%M:%S")
+        
+        print(f"查询服务 [{service_name}] 时间范围：{start_str} ~ {end_str}")
+        
+        # 遍历所有日志，查找该服务在时间范围内的日志
         for key, logs in LOGS_INDEX.items():
             if key.startswith(f"{service_name}|"):
-                log_time = key.split("|")[1]
-                log_minute = log_time[:16]  # 提取分钟部分
-                if log_minute == alert_minute:
-                    matched_logs = logs
-                    break
+                log_time = key.split("|")[1].rstrip("Z")
+                # 比较时间（字符串比较即可，因为格式一致）
+                if start_str <= log_time <= end_str:
+                    matched_logs.extend(logs)
     
     # 如果未找到任何日志，返回错误
     if not matched_logs:
         return json_response({
             "code": 400,
-            "message": "serviceName is required",
+            "message": f"未找到服务 {service_name} 在告警时间前后 5 分钟内的日志",
             "data": None
         })
     

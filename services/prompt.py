@@ -163,6 +163,68 @@ def build_root_cause_user_prompt(
 
 
 # ============================================================
+# 故障现象总结提示词
+# ============================================================
+
+
+def build_fault_symptom_summary_prompt(
+    call_chain: list[str],
+    all_logs: list[dict],
+    alert_message: str | None = None,
+) -> str:
+    """
+    构建故障现象总结的提示词。
+
+    Args:
+        call_chain: 调用链列表
+        all_logs: 全链路日志列表
+        alert_message: 告警信息（可选）
+
+    Returns:
+        提示词文本
+    """
+    # 格式化调用链
+    chain_text = " -> ".join(call_chain) if call_chain else "无调用链信息"
+
+    # 按服务分组日志，提取关键错误
+    logs_by_service = {}
+    for log in all_logs:
+        svc = log.get("_source_service", log.get("service_name", "unknown"))
+        if svc not in logs_by_service:
+            logs_by_service[svc] = []
+        level = log.get("level", "?")
+        msg = log.get("message", "")
+        logs_by_service[svc].append(f"    [{level}] {msg}")
+
+    logs_text = ""
+    for svc, logs in logs_by_service.items():
+        logs_text += f"\n  {svc}:\n" + "\n".join(logs)
+
+    alert_info = f"\n告警信息：{alert_message}" if alert_message else "\n无告警信息"
+
+    prompt = f"""你是一个专业的运维故障分析专家。请根据以下调用链、日志和告警信息，总结故障现象。
+
+## 服务调用链
+{chain_text}
+
+## 各服务日志
+{logs_text}
+
+## 告警信息{alert_info}
+
+## 任务
+请简要总结此故障的现象，要求：
+1. 描述清楚哪个服务出现了什么问题
+2. 提及关键的错误信息
+3. 控制在 50 字以内
+4. 使用简洁的专业语言
+
+## 故障现象总结
+"""
+    return prompt
+
+
+# ============================================================
 # 排查流程总结提示词
 # ============================================================
 

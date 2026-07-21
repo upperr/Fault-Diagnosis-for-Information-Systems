@@ -13,11 +13,12 @@
 import logging
 from typing import Optional
 
-from services.knowledge_manager.case_detector import CaseDetector
-from services.knowledge_manager.case_generator import CaseGenerator
-from services.knowledge_manager.case_adder import CaseAdder
-from services.knowledge_manager.query_builder import QueryBuilder
-from services.knowledge_manager.batch_importer import BatchImporter
+from services.api.knowledge_manager.case_detector import CaseDetector
+from services.api.knowledge_manager.case_generator import CaseGenerator
+from services.api.knowledge_manager.case_adder import CaseAdder
+from services.api.knowledge_manager.query_builder import QueryBuilder
+from services.api.knowledge_manager.batch_importer import BatchImporter
+from services.api.knowledge_manager.api_handler import KnowledgeAPIHandler
 from services.knowledge_retriever import get_retriever
 from services.llm_client import LLMClient
 

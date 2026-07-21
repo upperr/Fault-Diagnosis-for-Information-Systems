@@ -1,7 +1,7 @@
 """全链路日志追踪模块"""
 from datetime import datetime
 import logging
-from services.config import MAX_TRACE_DEPTH, LOG_API_ENABLED
+from services.config import LOG_API_ENABLED
 from data import query_logs as query_logs_mock, get_all_service_names as get_all_service_names_mock
 
 logger = logging.getLogger(__name__)
@@ -59,13 +59,12 @@ def get_all_service_names() -> list[str]:
 
 
 class LogTracker:
-    """全链路日志追踪：递归追踪微服务调用链"""
+    """全链路日志追踪：基于 trace_id 迭代追踪微服务调用链"""
 
     def __init__(self):
         self.call_chain: list[str] = []
         # 每条日志附带 _source_service 标记（内部使用，不输出）
         self.all_logs: list[dict] = []
-        self.visited_services: set[str] = set()
         self.logs_by_service: dict[str, list[dict]] = {}
         self.trace_id: str | None = None
         self.trace_confidence: str = "low"
@@ -75,17 +74,18 @@ class LogTracker:
         self,
         service_name: str,
         start_time: str,
-        trace_id: str | None = None,
-        depth: int = 0,
+        alert_message: str = "",
     ) -> dict:
         """
-        递归追踪服务日志，发现下游调用自动深入。
+        迭代追踪服务日志链路：
+        1. 使用 LLM 分析第一条日志，确定 trace_id
+        2. 基于 trace_id 和下游微服务名称，迭代追踪后续链路
+        3. 最多追踪 4 个微服务（或直到下游为空）
 
         Args:
-            service_name: 服务名称
+            service_name: 告警微服务名称
             start_time: 告警起始时间
-            trace_id: 追踪 ID（可选）
-            depth: 当前递归深度
+            alert_message: 告警信息（用于 LLM 语义分析，确定最相关的 trace_id）
 
         Returns:
             {
@@ -97,28 +97,14 @@ class LogTracker:
                 "trace_reasoning": "...",
             }
         """
-        if depth >= MAX_TRACE_DEPTH:
-            logger.info(f"已达最大追踪深度 {MAX_TRACE_DEPTH}，停止递归")
-            return self._build_result(reached_max_depth=True)
-
-        if service_name in self.visited_services:
-            logger.warning(f"服务 {service_name} 已追踪过，跳过循环依赖")
-            return self._build_result(cycle_detected=True)
-
-        self.visited_services.add(service_name)
-        self.call_chain.append(service_name)
-        logger.info(
-            f"[深度 {depth}] 追踪服务：{service_name}, 时间范围：{start_time} 前后 5 分钟"
-        )
-
-        # 查询该服务在告警时间前后 5 分钟内的所有日志（不再区分级别）
-        all_service_logs = query_logs(
+        # 步骤 1: 查询告警服务的日志，使用 LLM 确定 trace_id
+        logger.info(f"[步骤 1] 查询告警服务日志：{service_name}, 时间：{start_time} 前后 5 分钟")
+        first_service_logs = query_logs(
             service_name=service_name,
             start_time=start_time,
-            trace_id=trace_id,
         )
         
-        # 按与告警时间差排序（时间差最小的在前，不是越早越好）
+        # 按与告警时间差排序
         alert_dt = None
         if start_time:
             try:
@@ -128,7 +114,8 @@ class LogTracker:
         
         if alert_dt:
             def time_diff(log):
-                log_time_str = log.get("产生时间", log.get("timestamp", ""))
+                # 使用内部格式的 timestamp 字段
+                log_time_str = log.get("timestamp", "")
                 if not log_time_str:
                     return float('inf')
                 try:
@@ -136,81 +123,106 @@ class LogTracker:
                     return abs((log_dt - alert_dt).total_seconds())
                 except Exception:
                     return float('inf')
-            all_service_logs.sort(key=time_diff)
+            first_service_logs.sort(key=time_diff)
             logger.info(f"  日志已按与告警时间差排序（最接近的在前）")
         else:
-            all_service_logs.sort(key=lambda x: x.get("timestamp", x.get("产生时间", "")))
+            first_service_logs.sort(key=lambda x: x.get("timestamp", ""))
 
-        # 存储日志（标记来源服务，内部使用）
-        for log in all_service_logs:
-            log["_source_service"] = service_name
-            self.all_logs.append(log)
+        logger.info(f"  获取到 {len(first_service_logs)} 条日志")
 
-        self.logs_by_service[service_name] = all_service_logs
-
-        logger.info(
-            f"  获取到 {len(all_service_logs)} 条日志"
+        # 使用 LLM 分析日志关联性，确定 trace_id
+        logger.info("  使用 LLM 分析日志关联性，确定 trace_id...")
+        from services.llm_client import LLMClient
+        llm = LLMClient()
+        
+        correlation_result = llm.analyze_log_correlation(
+            service_name=service_name,
+            alert_message=alert_message,
+            alert_time=start_time,
+            logs=first_service_logs,
         )
+        
+        self.trace_id = correlation_result.get("trace_id")
+        self.trace_confidence = correlation_result.get("confidence", "low")
+        self.trace_reasoning = correlation_result.get("reasoning", "")
+        
+        logger.info(f"  确定 trace_id: {self.trace_id} (置信度：{self.trace_confidence})")
 
-        # 如果是第一个服务（告警服务），使用 LLM 分析日志关联性确定 trace_id
-        if depth == 0 and not self.trace_id:
-            logger.info("  使用 LLM 分析日志关联性，确定 trace_id...")
-            from services.llm_client import LLMClient
-            llm = LLMClient()
+        # 步骤 2: 基于 trace_id 迭代追踪调用链
+        logger.info(f"[步骤 2] 基于 trace_id={self.trace_id} 迭代追踪调用链...")
+        
+        current_service = service_name
+        current_time = start_time
+        max_services = 4  # 最多追踪 4 个微服务
+        
+        for step in range(max_services):
+            logger.info(f"  [链路节点 {step + 1}/{max_services}] 追踪服务：{current_service}")
             
-            # 构建告警信息（从 main.py 传递过来会更好，这里暂时用空值）
-            alert_message = ""
-            correlation_result = llm.analyze_log_correlation(
-                service_name=service_name,
-                alert_message=alert_message,
-                alert_time=start_time,
-                logs=all_service_logs,
+            # 查询该服务的日志
+            service_logs = query_logs(
+                service_name=current_service,
+                start_time=current_time,
             )
             
-            self.trace_id = correlation_result.get("trace_id")
-            self.trace_confidence = correlation_result.get("confidence", "low")
-            self.trace_reasoning = correlation_result.get("reasoning", "")
-            
-            logger.info(f"  确定 trace_id: {self.trace_id} (置信度：{self.trace_confidence})")
-            
-            # 如果确定了 trace_id，用该 trace_id 重新查询所有服务的日志
+            # 过滤出与 trace_id 匹配的日志
             if self.trace_id:
-                logger.info(f"  使用 trace_id={self.trace_id} 重新追踪调用链...")
-                # 清空已收集的日志，用 trace_id 重新查询
-                self.all_logs = []
-                self.logs_by_service = {}
-                self.visited_services = set()
-                self.call_chain = []
-                # 重新追踪，这次使用 trace_id
-                return self.trace(
-                    service_name=service_name,
-                    start_time=start_time,
-                    trace_id=self.trace_id,
-                    depth=0,
-                )
-
-        # 检测下游服务调用（优先从日志中检测）
-        downstream_found = False
-        for log in all_service_logs:
-            has_downstream, downstream_service = self._detect_downstream(log, service_name)
-            if has_downstream and downstream_service:
-                logger.info(f"  发现下游服务调用：{downstream_service}")
-                downstream_found = True
-                # 递归追踪下游服务
-                self.trace(
-                    service_name=downstream_service,
-                    start_time=log.get("timestamp", log.get("产生时间", start_time)),
-                    trace_id=self.trace_id,  # 使用已确定的 trace_id
-                    depth=depth + 1,
-                )
-                break  # 每次只追踪第一个发现的下游，避免分支爆炸
-
-        if not downstream_found:
-            if depth == 0:
-                logger.info("  未发现下游服务调用，当前服务可能为根因")
+                matched_logs = [
+                    log for log in service_logs
+                    if log.get("trace_id") == self.trace_id or log.get("traceid") == self.trace_id
+                ]
+                logger.info(f"    查询到 {len(service_logs)} 条日志，匹配 trace_id 的有 {len(matched_logs)} 条")
             else:
-                logger.info(f"  {service_name} 为调用链末端，可能为根因服务")
-
+                matched_logs = service_logs
+                logger.info(f"    查询到 {len(matched_logs)} 条日志（无 trace_id 过滤）")
+            
+            # 按时间排序
+            if alert_dt:
+                def time_diff(log):
+                    # 使用内部格式的 timestamp 字段
+                    log_time_str = log.get("timestamp", "")
+                    if not log_time_str:
+                        return float('inf')
+                    try:
+                        log_dt = datetime.fromisoformat(log_time_str.rstrip("Z"))
+                        return abs((log_dt - alert_dt).total_seconds())
+                    except Exception:
+                        return float('inf')
+                matched_logs.sort(key=time_diff)
+            
+            # 存储日志（标记来源服务）
+            for log in matched_logs:
+                log["_source_service"] = current_service
+                self.all_logs.append(log)
+            
+            if current_service not in self.logs_by_service:
+                self.logs_by_service[current_service] = []
+            self.logs_by_service[current_service].extend(matched_logs)
+            
+            # 添加到调用链
+            self.call_chain.append(current_service)
+            
+            # 检测下游服务：从匹配的日志中找到下游微服务名称
+            downstream_service = None
+            downstream_time = current_time
+            for log in matched_logs:
+                has_downstream, downstream = self._detect_downstream(log, current_service)
+                if has_downstream and downstream:
+                    downstream_service = downstream
+                    # 使用内部格式的 timestamp 字段
+                    downstream_time = log.get("timestamp", current_time)
+                    logger.info(f"    发现下游服务：{downstream_service}, 时间：{downstream_time}")
+                    break
+            
+            # 如果没有下游服务，链路结束
+            if not downstream_service:
+                logger.info(f"    未发现下游服务，链路追踪结束")
+                break
+            
+            # 继续追踪下游服务
+            current_service = downstream_service
+            current_time = downstream_time
+        
+        logger.info(f"链路追踪完成，共追踪 {len(self.call_chain)} 个服务：{' -> '.join(self.call_chain)}")
         return self._build_result()
 
     def _detect_downstream(self, log: dict, source_service: str) -> tuple[bool, str | None]:
@@ -235,13 +247,9 @@ class LogTracker:
             result[svc].append(clean_log)
         return result
 
-    def _build_result(
-        self,
-        reached_max_depth: bool = False,
-        cycle_detected: bool = False,
-    ) -> dict:
+    def _build_result(self) -> dict:
         """构建返回结果"""
-        result = {
+        return {
             "call_chain": list(self.call_chain),
             "logs_by_service": self._build_logs_dict(),
             "all_logs": list(self.all_logs),
@@ -249,8 +257,3 @@ class LogTracker:
             "trace_confidence": self.trace_confidence,
             "trace_reasoning": self.trace_reasoning,
         }
-        if reached_max_depth:
-            result["reached_max_depth"] = True
-        if cycle_detected:
-            result["cycle_detected"] = True
-        return result

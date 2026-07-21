@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-本地 Mock API 服务
-从 mock_data.json 读取数据，提供与 http://27.8.31.7:8002 相同的接口
+本地 Mock API 服务 (适配 mock_data2.json 新格式)
+从 mock_data2.json 读取数据，提供与 http://27.8.31.7:8000 相同的接口
 
 接口:
   GET  /api/alerts  - 返回随机一条告警
   POST /api/trace   - 根据 serviceName 和 alertTime 查询日志链路
+
+数据格式变化:
+  - logs 字段现在是扁平列表，每条日志直接包含：
+    {
+      "微服务名称": "...",
+      "日志等级": "...",
+      "日志内容": "...",
+      "产生时间": "...",
+      "下游微服务名称": "...",
+      "traceid": "..."
+    }
 
 启动:
   python mock_api_server.py
@@ -19,7 +30,7 @@ import json
 import random
 from pathlib import Path
 from flask import Flask, request, Response
-from urllib.parse import unquote
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -40,7 +51,7 @@ MOCK_DATA_FILE = Path(__file__).parent / "dataset/mock_data.json"
 
 
 def load_mock_data():
-    """从 mock_data.json 加载数据"""
+    """从 mock_data2.json 加载数据"""
     if not MOCK_DATA_FILE.exists():
         print(f"⚠️  警告：{MOCK_DATA_FILE} 不存在，将使用空数据")
         return [], []
@@ -50,16 +61,8 @@ def load_mock_data():
             data = json.load(f)
         
         alerts = data.get("alerts", [])
-        logs_raw = data.get("logs", [])
-        
-        # logs 是嵌套结构：[{ "服务名 时间": [日志列表] }, ...]
-        # 需要展平成单一的日志列表
-        logs = []
-        for item in logs_raw:
-            if isinstance(item, dict):
-                for key, log_list in item.items():
-                    if isinstance(log_list, list):
-                        logs.extend(log_list)
+        # 新格式：logs 直接是扁平列表，无需展平
+        logs = data.get("logs", [])
         
         print(f"✓ 加载告警数据：{len(alerts)} 条")
         print(f"✓ 加载日志数据：{len(logs)} 条")
@@ -73,16 +76,15 @@ def load_mock_data():
 # 全局数据存储
 ALERTS_STORE, LOGS_STORE = load_mock_data()
 
-# 构建日志索引：按 (微服务名称，产生时间) 快速查找
-LOGS_INDEX = {}
+# 构建日志索引：按 (微服务名称) 组织，便于快速查找
+# 新格式下每条日志直接包含 "微服务名称" 字段
+LOGS_INDEX_BY_SERVICE = {}
 for log in LOGS_STORE:
     service = log.get("微服务名称", "")
-    time = log.get("产生时间", "")
-    if service and time:
-        key = f"{service}|{time}"
-        if key not in LOGS_INDEX:
-            LOGS_INDEX[key] = []
-        LOGS_INDEX[key].append(log)
+    if service:
+        if service not in LOGS_INDEX_BY_SERVICE:
+            LOGS_INDEX_BY_SERVICE[service] = []
+        LOGS_INDEX_BY_SERVICE[service].append(log)
 
 
 # ============================================================
@@ -93,8 +95,8 @@ for log in LOGS_STORE:
 def index():
     """服务首页"""
     return json_response({
-        "service": "Mock API Server",
-        "version": "1.0.0",
+        "service": "Mock API Server v2",
+        "version": "2.0.0",
         "data_source": str(MOCK_DATA_FILE),
         "endpoints": {
             "GET /api/alerts": "获取随机一条告警信息",
@@ -138,26 +140,42 @@ def query_trace():
     """
     根据微服务名称和告警时间查询日志链路
     请求方式：POST + URL params（httpx 会自动编码中文）
+    
+    功能：检索指定服务在告警时间前后 5 分钟内的所有日志
     """
-    # 从 URL query params 获取参数
-    service_name = request.args.get("serviceName")
-    alert_time = request.args.get("alertTime")
-    
-    from datetime import datetime, timedelta
-    
-    # 标准化时间格式（处理 Z 后缀）
-    alert_time_normalized = alert_time.rstrip("Z")
-    
-    # 解析告警时间
     try:
-        alert_dt = datetime.fromisoformat(alert_time_normalized)
-    except Exception as e:
-        print(f"时间解析失败：{e}")
-        alert_dt = None
-    
-    matched_logs = []
-    
-    if alert_dt:
+        # 从 URL query params 获取参数
+        service_name = request.args.get("serviceName")
+        alert_time = request.args.get("alertTime")
+        
+        # 参数验证
+        if not service_name:
+            return json_response({
+                "code": 400,
+                "message": "缺少 serviceName 参数",
+                "data": None
+            })
+        
+        if not alert_time:
+            return json_response({
+                "code": 400,
+                "message": "缺少 alertTime 参数",
+                "data": None
+            })
+        
+        # 标准化时间格式（处理 Z 后缀）
+        alert_time_normalized = alert_time.rstrip("Z")
+        
+        # 解析告警时间
+        try:
+            alert_dt = datetime.fromisoformat(alert_time_normalized)
+        except Exception as e:
+            return json_response({
+                "code": 400,
+                "message": f"时间格式错误：{e}",
+                "data": None
+            })
+        
         # 计算时间范围：告警时间前后 5 分钟
         start_dt = alert_dt - timedelta(minutes=5)
         end_dt = alert_dt + timedelta(minutes=5)
@@ -167,27 +185,42 @@ def query_trace():
         
         print(f"查询服务 [{service_name}] 时间范围：{start_str} ~ {end_str}")
         
-        # 遍历所有日志，查找该服务在时间范围内的日志
-        for key, logs in LOGS_INDEX.items():
-            if key.startswith(f"{service_name}|"):
-                log_time = key.split("|")[1].rstrip("Z")
-                # 比较时间（字符串比较即可，因为格式一致）
-                if start_str <= log_time <= end_str:
-                    matched_logs.extend(logs)
-    
-    # 如果未找到任何日志，返回错误
-    if not matched_logs:
+        # 从索引中获取该服务的所有日志
+        service_logs = LOGS_INDEX_BY_SERVICE.get(service_name, [])
+        
+        # 筛选时间范围内的日志
+        matched_logs = []
+        for log in service_logs:
+            log_time_raw = log.get("产生时间", "")
+            log_time_normalized = log_time_raw.rstrip("Z")
+            
+            # 比较时间（字符串比较即可，因为格式一致）
+            if start_str <= log_time_normalized <= end_str:
+                matched_logs.append(log)
+        
+        # 如果未找到任何日志，返回错误
+        if not matched_logs:
+            return json_response({
+                "code": 400,
+                "message": f"未找到服务 {service_name} 在告警时间前后 5 分钟内的日志",
+                "data": None
+            })
+        
         return json_response({
-            "code": 400,
-            "message": f"未找到服务 {service_name} 在告警时间前后 5 分钟内的日志",
+            "code": 200,
+            "message": "success",
+            "data": matched_logs
+        })
+        
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] /api/trace 内部错误：{e}")
+        print(f"[ERROR] 堆栈跟踪:\n{traceback.format_exc()}")
+        return json_response({
+            "code": 500,
+            "message": f"服务器内部错误：{str(e)}",
             "data": None
         })
-    
-    return json_response({
-        "code": 200,
-        "message": "success",
-        "data": matched_logs
-    })
 
 
 @app.route("/api/services", methods=["GET"])
@@ -238,7 +271,7 @@ def get_stats():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("Mock API Server 启动中...")
+    print("Mock API Server v2 启动中...")
     print("=" * 60)
     print(f"数据文件：{MOCK_DATA_FILE}")
     print(f"告警数据：{len(ALERTS_STORE)} 条")

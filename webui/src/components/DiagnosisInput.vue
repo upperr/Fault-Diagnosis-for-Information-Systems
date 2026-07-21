@@ -107,16 +107,16 @@
     <div class="help-section">
       <h3>输入说明</h3>
       <p v-if="inputMode === 'form'">请填写以上字段，<strong>微服务名称</strong>和<strong>告警时间</strong>为必填项，<strong>告警信息</strong>为可选项（留空时系统将仅基于微服务链路日志进行分析）。</p>
-      <p v-else>请直接粘贴 JSON 格式的告警数据，支持以下字段名称：</p>
+      <p v-else>请直接粘贴 JSON 格式的告警数据，支持以下字段：</p>
       <ul v-if="inputMode === 'form'">
         <li><code>微服务名称</code> <span class="field-desc">- 发生故障的微服务名称（必填）</span></li>
         <li><code>告警时间</code> <span class="field-desc">- 告警发生的时间，支持 ISO 8601 格式（必填）</span></li>
         <li><code>告警信息</code> <span class="field-desc">- 具体的错误或异常描述（可选）</span></li>
       </ul>
       <ul v-else>
-        <li><code>微服务名称</code> / <code>service_name</code> / <code>serviceName</code></li>
-        <li><code>告警信息</code> / <code>alert_message</code> / <code>alertMessage</code> / <code>message</code></li>
-        <li><code>告警时间</code> / <code>alert_time</code> / <code>alertTime</code> / <code>time</code></li>
+        <li><code>微服务名称</code> <span class="field-desc">- 发生故障的微服务名称（必填）</span></li>
+        <li><code>告警时间</code> <span class="field-desc">- 告警发生的时间，支持 ISO 8601 格式（必填）</span></li>
+        <li><code>告警信息</code> <span class="field-desc">- 具体的错误或异常描述（可选）</span></li>
       </ul>
     </div>
   </section>

@@ -163,7 +163,7 @@ class CaseAdder:
         query_text = self.query_builder.build_query_text(all_logs)
 
         # 2. 两阶段判定 (需要导入 detector，避免循环依赖)
-        from services.knowledge_manager.case_detector import CaseDetector
+        from services.api.knowledge_manager.case_detector import CaseDetector
         from services.llm_client import LLMClient
         
         llm_client = LLMClient()
@@ -187,7 +187,7 @@ class CaseAdder:
         # 3. 生成新故障确认信息
         logger.info(f"【知识库更新检测】检测到可能的新故障（最高相似度：{max_sim:.3f}），等待用户确认")
         
-        from services.knowledge_manager.case_generator import CaseGenerator
+        from services.api.knowledge_manager.case_generator import CaseGenerator
         
         generator = CaseGenerator(llm_client)
         new_case_info = generator.generate_new_case_info(

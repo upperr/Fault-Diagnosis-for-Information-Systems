@@ -17,7 +17,7 @@ class RerankClient:
         self.logger = logging.getLogger(__name__)
     
     def rerank(self, query: str, cases: list[dict], top_k: int) -> list[dict]:
-        """使用 Reranker 模型对案例进行重排序
+        """使用 Reranker 模型对案例进行重排序（多字段召回合并策略）
         
         Args:
             query: 查询文本
@@ -27,9 +27,10 @@ class RerankClient:
         Returns:
             重排序后的案例列表
         """
-        self.logger.info(f"开始 Reranker 精排，输入 {len(cases)} 个案例，目标 top_k={top_k}")
+        self.logger.info(f"开始 Reranker 精排（多字段），输入 {len(cases)} 个案例，目标 top_k={top_k}")
         
         if not cases:
+            self.logger.warning("输入案例列表为空，跳过 Rerank")
             return []
         
         try:
@@ -40,30 +41,86 @@ class RerankClient:
             dashscope.api_key = self.api_key
             dashscope.base_http_api_url = "https://dashscope.aliyuncs.com/api/v1"
             
-            # 准备文档列表：组合故障现象和根因作为检索文本
-            documents = []
-            for case in cases:
-                doc_text = f"故障现象：{case.get('fault_symptom', '')}\n根因：{case.get('root_cause', '')}"
-                documents.append(doc_text[:2000])
+            # 多字段检索：对每个字段分别进行 Rerank
+            all_rerank_results = {}
+            search_fields = ["fault_symptom", "diagnosis_process", "root_cause"]
             
-            self.logger.debug(f"调用 Reranker API: query={query[:50]}..., docs={len(documents)}")
-            
-            # 同步调用 Reranker API
-            resp = dashscope.TextReRank.call(
-                model=self.model,
-                query=query,
-                documents=documents,
-                top_n=top_k,
-                return_documents=True,
-            )
-            
-            if resp.status_code == HTTPStatus.OK:
-                self.logger.info("Reranker 调用成功")
-                return self._parse_rerank_result(resp, cases, top_k)
-            else:
-                self.logger.warning(f"Reranker 调用失败：{resp.status_code}")
-                return cases[:top_k]
+            for field in search_fields:
+                # 准备文档列表：使用当前字段的内容
+                documents = []
+                for case in cases:
+                    doc_text = case.get(field, '')
+                    if doc_text:
+                        documents.append(doc_text[:2000])
+                    else:
+                        documents.append("")  # 空字段占位
                 
+                self.logger.debug(f"调用 Reranker API (field={field}): query={query[:50]}..., docs={len(documents)}")
+                
+                # 同步调用 Reranker API
+                resp = dashscope.TextReRank.call(
+                    model=self.model,
+                    query=query,
+                    documents=documents,
+                    top_n=len(cases),
+                    return_documents=True,
+                )
+                
+                if resp.status_code == HTTPStatus.OK:
+                    self.logger.debug(f"Reranker ({field}) 调用成功")
+                    field_results = self._parse_rerank_result(resp, cases, len(cases))
+                    
+                    # 记录该字段的召回结果
+                    if field_results:
+                        top_scores = [c.get('rerank_score', 0) for c in field_results[:3]]
+                        self.logger.info(f"字段 [{field}] Rerank 召回 {len(field_results)} 个案例，最高分：{max(top_scores):.3f}")
+                    else:
+                        self.logger.info(f"字段 [{field}] Rerank 召回 0 个案例")
+                    
+                    # 合并结果，保留最高分
+                    for case in field_results:
+                        case_no = case["case_no"]
+                        field_score = case.get('rerank_score', 0)
+                        if case_no not in all_rerank_results:
+                            all_rerank_results[case_no] = case
+                            all_rerank_results[case_no]['best_field'] = field
+                        else:
+                            # 保留最高分
+                            if field_score > all_rerank_results[case_no].get('rerank_score', 0):
+                                all_rerank_results[case_no]['rerank_score'] = field_score
+                                all_rerank_results[case_no]['best_field'] = field
+                else:
+                    self.logger.warning(f"Reranker ({field}) 调用失败：{resp.status_code}")
+            
+            # 按 rerank 分数降序排序
+            reranked = list(all_rerank_results.values())
+            reranked.sort(key=lambda x: x.get('rerank_score', 0.0), reverse=True)
+            
+            # 过滤低于阈值的案例
+            from services.config import RERANK_THRESHOLD
+            filtered = [c for c in reranked if c.get('rerank_score', 0) >= RERANK_THRESHOLD]
+            
+            # 限制返回数量
+            if len(filtered) > top_k:
+                filtered = filtered[:top_k]
+            
+            # 报告精排最终结果
+            if filtered:
+                top_case = filtered[0]
+                self.logger.info(
+                    f"Rerank 精排最终结果：保留 {len(filtered)} 个案例 "
+                    f"(阈值={RERANK_THRESHOLD}, top_k={top_k}), "
+                    f"最高分：{top_case.get('rerank_score', 0):.3f} "
+                    f"(字段：{top_case.get('best_field', 'unknown')})"
+                )
+            else:
+                self.logger.warning(
+                    f"Rerank 精排最终结果：0 个案例 (阈值={RERANK_THRESHOLD}, top_k={top_k}), "
+                    f"所有案例分数均低于阈值"
+                )
+            
+            return filtered
+            
         except ImportError:
             self.logger.warning("dashscope 未安装，跳过 Rerank")
             return cases[:top_k]
@@ -98,14 +155,9 @@ class RerankClient:
                     case['rerank_score'] = result.get('relevance_score', 0.0)
                     reranked.append(case)
             
-            # 按 rerank 分数降序排序
-            reranked.sort(key=lambda x: x.get('rerank_score', 0.0), reverse=True)
-            
-            # 过滤低于阈值的案例
-            filtered = [c for c in reranked if c.get('rerank_score', 0) >= RERANK_THRESHOLD]
-            
-            self.logger.info(f"Rerank 精排后保留 {len(filtered)} 个案例（阈值={RERANK_THRESHOLD}）")
-            return filtered
+            # 只解析结果，不排序和过滤（由 rerank 方法统一处理）
+            self.logger.debug(f"Rerank 解析完成：{len(reranked)} 个案例")
+            return reranked
             
         except Exception as e:
             self.logger.error(f"解析 Reranker 结果失败：{e}")

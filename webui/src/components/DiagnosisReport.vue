@@ -19,7 +19,7 @@
       <!-- 故障现象 -->
       <div class="report-section">
         <h3>故障现象</h3>
-        <p class="fault-summary">{{ report.故障现象 || '暂无' }}</p>
+        <p class="fault-summary">{{ report['故障现象简述'] || '暂无' }}</p>
       </div>
 
       <!-- 调用链路 -->
@@ -27,7 +27,7 @@
         <h3>调用链路</h3>
         <div v-if="report.call_chain && report.call_chain.length > 0" class="call-chain">
           <div class="chain-item" v-for="(svc, index) in report.call_chain" :key="index">
-            <span class="chain-service">{{ svc }}</span>
+            <span :class="['chain-service', getServiceLevelClass(svc)]">{{ svc }}</span>
             <span v-if="index < report.call_chain.length - 1" class="chain-arrow">→</span>
           </div>
         </div>
@@ -131,11 +131,11 @@
         <div class="new-case-actions">
           <p class="action-prompt">是否添加入历史故障知识库？</p>
           <div class="button-row">
-            <button @click="$emit('confirm-add-case')" :disabled="addingCase" class="btn btn-success">
+            <button @click="$emit('confirm-add-case')" :disabled="addingCase" class="btn btn-success btn-small">
               {{ addingCase ? '添加中...' : '添加' }}
             </button>
-            <button @click="$emit('cancel-new-case')" class="btn btn-secondary">取消</button>
-            <button @click="$emit('download-json')" class="btn btn-white">下载 JSON</button>
+            <button @click="$emit('cancel-new-case')" class="btn btn-white btn-small">取消</button>
+            <button @click="$emit('download-json')" class="btn btn-white btn-small">下载 JSON</button>
           </div>
         </div>
       </div>
@@ -144,11 +144,11 @@
         <strong>新故障:</strong> {{ report.new_case_message }}
       </div>
 
-      <!-- 原始 JSON -->
+      <!-- JSON 诊断报告 -->
       <div class="report-section">
-        <h3>原始 JSON</h3>
-        <pre class="json-output">{{ JSON.stringify(report, null, 2) }}</pre>
-        <button @click="$emit('copy-report')" class="btn btn-small">复制 JSON</button>
+        <h3>JSON 诊断报告</h3>
+        <pre class="json-output">{{ jsonReport }}</pre>
+        <button @click="copyJsonReport" class="btn btn-small">复制 JSON</button>
       </div>
     </div>
   </section>
@@ -163,17 +163,49 @@ export default {
   },
   computed: {
     suggestionList() {
-      if (!this.report?.suggestion) return []
+      // 后端返回中文字段 '处置建议'
+      if (!this.report?.处置建议) return []
       if (Array.isArray(this.report.处置建议)) {
         return this.report.处置建议
       }
-      return this.report.处置建议.split(/\n|\n/).filter(s => s.trim())
+      return this.report.处置建议.split(/\n|\r\n/).filter(s => s.trim())
+    },
+    jsonReport() {
+      // 仅输出 4 个核心字段
+      if (!this.report) return '{}'
+      return JSON.stringify({
+        '故障现象简述': this.report['故障现象简述'],
+        '受影响服务列表': this.report['受影响服务列表'],
+        '根因分析': this.report['根因分析'],
+        '处置建议': this.report['处置建议']
+      }, null, 2)
     }
   },
   methods: {
     confidenceText(level) {
       const map = { high: '高', medium: '中', low: '低' }
       return map[level] || level
+    },
+    copyJsonReport() {
+      navigator.clipboard.writeText(this.jsonReport)
+      alert('已复制 JSON 诊断报告到剪贴板')
+    },
+    /**
+     * 根据服务名称检查该服务是否有 ERROR 级日志
+     * @param {string} serviceName - 服务名称
+     * @returns {string} - CSS 类名：'error' 或 ''
+     */
+    getServiceLevelClass(serviceName) {
+      if (!this.report?.logs || !Array.isArray(this.report.logs)) {
+        return ''
+      }
+      // 检查该服务是否有 ERROR 级日志
+      const hasError = this.report.logs.some(log => {
+        const logService = log.微服务名称 || log.service || log._source_service
+        const logLevel = log.level || log.日志等级
+        return logService === serviceName && logLevel === 'ERROR'
+      })
+      return hasError ? 'error' : ''
     }
   }
 }
@@ -274,6 +306,14 @@ export default {
   border-radius: 20px;
   font-weight: 600;
   font-size: 13px;
+  transition: all 0.3s ease;
+}
+
+.chain-service.error {
+  background: linear-gradient(90deg, #ff4444, #cc0000);
+  color: #fff;
+  border: 2px solid #ff6666;
+  box-shadow: 0 0 10px rgba(255, 68, 68, 0.5);
 }
 
 .chain-arrow {

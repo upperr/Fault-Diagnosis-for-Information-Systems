@@ -10,6 +10,8 @@ from services.prompt import (
     build_root_cause_user_prompt,
     LOG_CORRELATION_SYSTEM_PROMPT,
     build_log_correlation_prompt,
+    build_fault_symptom_summary_prompt,
+    build_diagnosis_process_summary_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,6 +100,113 @@ class LLMClient:
         except Exception as e:
             logger.error(f"LLM 调用失败：{e}")
             return self._rule_based_fallback(call_chain, all_logs, matched_cases, error_type)
+
+    def generate_fault_symptom(
+        self,
+        call_chain: list[str],
+        all_logs: list[dict],
+        alert_message: str | None = None,
+    ) -> str:
+        """
+        使用 LLM 生成故障现象总结。
+
+        Args:
+            call_chain: 调用链列表
+            all_logs: 全链路日志列表
+            alert_message: 告警信息（可选）
+
+        Returns:
+            故障现象总结文本
+        """
+        client = self._get_client()
+        if not client:
+            logger.warning("LLM 不可用，使用规则生成故障现象")
+            return self._rule_based_fault_symptom(call_chain, all_logs, alert_message)
+
+        user_prompt = build_fault_symptom_summary_prompt(
+            call_chain, all_logs, alert_message,
+        )
+
+        try:
+            response = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": "你是一个专业的运维故障分析专家，擅长总结故障现象。"},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.3,
+                max_tokens=500,
+            )
+            content = response.choices[0].message.content
+            symptom = content.strip() if content else ""
+            if not symptom:
+                logger.warning("LLM 返回空内容")
+                symptom = self._rule_based_fault_symptom(call_chain, all_logs, alert_message)
+            logger.info(f"生成故障现象：{symptom[:100]}...")
+            return symptom
+        except Exception as e:
+            logger.error(f"生成故障现象失败：{e}")
+            return self._rule_based_fault_symptom(call_chain, all_logs, alert_message)
+
+    def generate_diagnosis_process(
+        self,
+        call_chain: list[str],
+        all_logs: list[dict],
+    ) -> str:
+        """
+        使用 LLM 生成排查流程总结。
+
+        Args:
+            call_chain: 调用链列表
+            all_logs: 全链路日志列表
+
+        Returns:
+            排查流程总结文本
+        """
+        client = self._get_client()
+        if not client:
+            logger.warning("LLM 不可用，使用调用链作为排查流程")
+            return " -> ".join(call_chain) if call_chain else "无调用链信息"
+
+        user_prompt = build_diagnosis_process_summary_prompt(call_chain, all_logs)
+
+        try:
+            response = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": "你是一个专业的运维故障分析专家，擅长总结故障排查流程。"},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.3,
+                max_tokens=800,
+            )
+            content = response.choices[0].message.content
+            process = content.strip() if content else ""
+            if not process:
+                logger.warning("LLM 返回空内容")
+                process = " -> ".join(call_chain) if call_chain else "无调用链信息"
+            logger.info(f"生成排查流程：{process[:100]}...")
+            return process
+        except Exception as e:
+            logger.error(f"生成排查流程失败：{e}")
+            return " -> ".join(call_chain) if call_chain else "无调用链信息"
+
+    def _rule_based_fault_symptom(
+        self,
+        call_chain: list[str],
+        all_logs: list[dict],
+        alert_message: str | None = None,
+    ) -> str:
+        """LLM 不可用时的规则生成降级"""
+        affected = call_chain[-1] if call_chain else "unknown"
+        if len(call_chain) > 1:
+            chain_str = " -> ".join(call_chain)
+            return f"调用链异常 ({chain_str}): {affected} 服务发生故障"
+        elif alert_message:
+            short_msg = alert_message[:100] + ("..." if len(alert_message) > 100 else "")
+            return f"{affected} 服务异常：{short_msg}"
+        else:
+            return f"{affected} 服务发生故障"
 
     def analyze_log_correlation(
         self,

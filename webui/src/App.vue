@@ -6,7 +6,10 @@
         <div class="header-content">
           <h1>告警驱动型故障诊断智能体</h1>
         </div>
-        <button @click="goToKnowledge" class="btn btn-knowledge">知识库管理</button>
+        <div class="header-buttons">
+          <button @click="goToWarning" class="btn btn-warning">故障预警</button>
+          <button @click="goToKnowledge" class="btn btn-knowledge">知识库管理</button>
+        </div>
       </header>
 
       <main class="main">
@@ -38,7 +41,7 @@
 
     <!-- 知识库管理页面 -->
     <KnowledgePage
-      v-else
+      v-else-if="currentPage === 'knowledge'"
       :stats="knowledgeStats"
       :selected-file="selectedFile"
       :uploading="uploading"
@@ -55,6 +58,13 @@
       @confirm-clear="confirmClear"
       @delete-case="loadKnowledgeStats"
     />
+    
+    <!-- 故障预警页面 -->
+    <WarningGraph
+      v-else-if="currentPage === 'warning'"
+      :diagnosis-result="diagnosisResultForGraph"
+      @back="goToHome"
+    />
   </div>
 </template>
 
@@ -63,13 +73,15 @@ import axios from 'axios'
 import DiagnosisInput from './components/DiagnosisInput.vue'
 import DiagnosisReport from './components/DiagnosisReport.vue'
 import KnowledgePage from './pages/KnowledgePage.vue'
+import WarningGraph from './pages/WarningGraph.vue'
 
 export default {
   name: 'App',
   components: {
     DiagnosisInput,
     DiagnosisReport,
-    KnowledgePage
+    KnowledgePage,
+    WarningGraph
   },
   data() {
     return {
@@ -89,13 +101,24 @@ export default {
       overwriteDuplicates: false,
       confirming: false,
       importResult: null,
-      clearing: false
+      clearing: false,
+      // 预警图
+      diagnosisResultForGraph: null
     }
   },
   methods: {
     goToKnowledge() {
       this.currentPage = 'knowledge'
       this.loadKnowledgeStats()
+    },
+    goToWarning() {
+      // 只有已完成诊断才进入预警图界面
+      if (!this.report) {
+        alert('请先输入待诊断告警信息并完成诊断')
+        return
+      }
+      this.currentPage = 'warning'
+      this.diagnosisResultForGraph = this.report
     },
     goToHome() {
       this.currentPage = 'home'
@@ -318,6 +341,24 @@ body {
   width: 100%;
 }
 
+.btn-warning {
+  padding: 10px 20px;
+  background: linear-gradient(135deg, rgba(0, 217, 255, 0.2), rgba(0, 255, 136, 0.2));
+  border: 1px solid rgba(0, 217, 255, 0.5);
+  color: #00d9ff;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.3s;
+  white-space: nowrap;
+}
+
+.btn-warning:hover {
+  background: linear-gradient(135deg, rgba(0, 217, 255, 0.3), rgba(0, 255, 136, 0.3));
+  border-color: rgba(0, 217, 255, 0.8);
+  transform: translateY(-2px);
+}
+
 @media (max-width: 768px) {
   .header {
     flex-direction: column;
@@ -329,8 +370,13 @@ body {
     text-align: center;
   }
   
-  .btn-knowledge {
+  .header-buttons {
     width: 100%;
+    justify-content: center;
+  }
+  
+  .btn-knowledge {
+    width: auto;
   }
 }
 
@@ -345,6 +391,11 @@ body {
 
 .header-content {
   flex: 1;
+}
+
+.header-buttons {
+  display: flex;
+  gap: 10px;
 }
 
 .header h1 {

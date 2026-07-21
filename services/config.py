@@ -109,9 +109,6 @@ NEW_CASE_SIMILARITY_THRESHOLD: float = float(
     os.getenv("NEW_CASE_SIMILARITY_THRESHOLD", "0.5")
 )
 
-# 是否启用自动学习 (新故障自动入库)
-ENABLE_AUTO_LEARN: bool = os.getenv("ENABLE_AUTO_LEARN", "false").lower() == "true"
-
 # 新故障判定 - 初筛向量相似度阈值
 NEW_CASE_INITIAL_THRESHOLD: float = float(os.getenv("NEW_CASE_INITIAL_THRESHOLD", "0.5"))
 

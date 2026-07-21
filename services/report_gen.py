@@ -20,7 +20,7 @@ class ReportGenerator:
         """
         生成标准化 JSON 格式诊断报告。
         输出字段与 output.jsonl 完全一致：
-          故障现象，排查流程，根因分析，处置建议
+          故障现象简述，受影响服务列表，根因分析，处置建议
 
         Args:
             alert_error_message: 告警原始错误信息
@@ -29,29 +29,31 @@ class ReportGenerator:
             all_logs: 所有追踪到的日志
             fault_summary: 故障现象简述（可选，自动生成）
         """
-        root_cause = root_cause_analysis.get("root_cause", "无法判断")
-        suggestion = root_cause_analysis.get("suggestion", "无")
+        from services.llm_client import LLMClient
+        
+        root_cause = root_cause_analysis.get("根因分析", "无法判断")
+        suggestion = root_cause_analysis.get("处置建议", "无")
 
-        # 自动生成故障摘要
-        if not fault_summary:
-            affected = call_chain[-1] if call_chain else "unknown"
-            if len(call_chain) > 1:
-                chain_str = " -> ".join(call_chain)
-                fault_summary = f"调用链异常 ({chain_str}): {affected} 服务发生故障"
-            elif alert_error_message:
-                short_msg = (
-                    alert_error_message[:100]
-                    + ("..." if len(alert_error_message) > 100 else "")
-                )
-                fault_summary = f"{affected} 服务异常：{short_msg}"
-            else:
-                fault_summary = f"{affected} 服务发生故障"
+        # 使用 LLM 生成故障现象简述
+        llm = LLMClient()
+        
+        if fault_summary:
+            fault_symptom = fault_summary
+        else:
+            fault_symptom = llm.generate_fault_symptom(
+                call_chain=call_chain,
+                all_logs=all_logs,
+                alert_message=alert_error_message,
+            )
+
+        # 受影响服务列表直接使用调用链
+        affected_services = list(call_chain)
 
         report = DiagnosticReport(
-            故障现象=fault_summary,
-            排查流程=list(call_chain),
-            根因分析=root_cause,
-            处置建议=suggestion,
+            fault_symptom=fault_symptom,
+            affected_services=affected_services,
+            root_cause=root_cause,
+            suggestion=suggestion,
         )
 
         logger.info("诊断报告生成完成")
